@@ -1,0 +1,37 @@
+# ── Deno ──────────────────────────────────────────────────────────────────────
+.deno/
+
+# ── Build output ──────────────────────────────────────────────────────────────
+dist/
+
+# ── Config with secrets ───────────────────────────────────────────────────────
+# Keep config.toml in version control but ignore any local overrides
+config.local.toml
+*.secret.toml
+
+# ── Environment variables ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ── Editor & IDE ──────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Temp / OS artefacts ───────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
