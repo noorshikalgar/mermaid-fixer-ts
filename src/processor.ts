@@ -2,20 +2,38 @@ import type { Config } from "./config.ts";
 import { MarkdownScanner } from "./scanner.ts";
 import { validateMermaid } from "./validator.ts";
 import { AiFixer } from "./fixer.ts";
-import { extractMermaidBlocks, replaceMermaidBlock } from "./utils.ts";
+import {
+  type MermaidBlock,
+  applyFixes,
+  extractMermaidBlocks,
+  normalizeMermaidSnippet,
+} from "./utils.ts";
 
 export interface ProcessStats {
   totalFiles:    number;
+  scannedFiles:  number;
   totalBlocks:   number;
   invalidBlocks: number;
   fixedBlocks:   number;
   failedFixes:   number;
 }
 
+// Internal record for a single broken block across phases
+interface BrokenRecord {
+  filePath:     string;
+  code:         string;        // normalized code sent to AI
+  block:        MermaidBlock;  // original block with character offsets
+  blockIndex:   number;        // 1-based index within the file
+  blockTotal:   number;        // total blocks in the file
+  error:        string;
+}
+
+const BAR = "━".repeat(56);
+
 export class MermaidProcessor {
-  private scanner:  MarkdownScanner;
-  private fixer:    AiFixer | null;
-  private verbose:  boolean;
+  private scanner: MarkdownScanner;
+  private fixer:   AiFixer | null;
+  private verbose: boolean;
 
   constructor(config: Config, dryRun: boolean, verbose: boolean) {
     this.scanner = new MarkdownScanner(config.scan.exclude_patterns ?? []);
@@ -24,95 +42,157 @@ export class MermaidProcessor {
   }
 
   async processDirectory(dir: string, dryRun: boolean): Promise<ProcessStats> {
-    if (this.verbose) console.log(`🚀 Scanning directory: ${dir}`);
+    // ── PHASE 1: Scan & detect ────────────────────────────────────────────
+    console.log(`\n${BAR}`);
+    console.log("📁  PHASE 1 — Scanning & detecting broken diagrams");
+    console.log(BAR);
 
     const files = await this.scanner.scanDirectory(dir);
-    if (this.verbose) console.log(`📄 Found ${files.length} Markdown file(s)`);
+    console.log(`   Found ${files.length} markdown file(s) in directory`);
 
     const stats: ProcessStats = {
       totalFiles:    files.length,
+      scannedFiles:  0,
       totalBlocks:   0,
       invalidBlocks: 0,
       fixedBlocks:   0,
       failedFixes:   0,
     };
 
-    for (const file of files) {
-      if (this.verbose) console.log(`\n📝 Processing: ${file}`);
-      const r = await this.processFile(file, dryRun);
-      stats.totalBlocks   += r.totalBlocks;
-      stats.invalidBlocks += r.invalidBlocks;
-      stats.fixedBlocks   += r.fixedBlocks;
-      stats.failedFixes   += r.failedFixes;
-    }
+    // Cache file contents so we don't re-read in Phase 3
+    const fileContents = new Map<string, string>();
+    const broken: BrokenRecord[] = [];
 
-    return stats;
-  }
-
-  private async processFile(
-    filePath: string,
-    dryRun: boolean,
-  ): Promise<{ totalBlocks: number; invalidBlocks: number; fixedBlocks: number; failedFixes: number }> {
-    let content: string;
-    try {
-      content = await Deno.readTextFile(filePath);
-    } catch (err) {
-      console.warn(`   ⚠️  Cannot read file: ${err instanceof Error ? err.message : err}`);
-      return { totalBlocks: 0, invalidBlocks: 0, fixedBlocks: 0, failedFixes: 0 };
-    }
-
-    const blocks = extractMermaidBlocks(content);
-
-    if (blocks.length === 0) {
-      if (this.verbose) console.log("   ℹ️  No Mermaid blocks found");
-      return { totalBlocks: 0, invalidBlocks: 0, fixedBlocks: 0, failedFixes: 0 };
-    }
-
-    if (this.verbose) console.log(`   🔍 Found ${blocks.length} Mermaid block(s)`);
-
-    let invalidBlocks = 0;
-    let fixedBlocks   = 0;
-    let failedFixes   = 0;
-    let newContent    = content;
-
-    for (let i = 0; i < blocks.length; i++) {
-      const { code } = blocks[i];
-      if (this.verbose) console.log(`      📊 Validating block ${i + 1}/${blocks.length}`);
-
-      const result = validateMermaid(code);
-
-      if (result.valid) {
-        if (this.verbose) console.log("         ✅ Block is valid");
+    for (const filePath of files) {
+      let content: string;
+      try {
+        content = await Deno.readTextFile(filePath);
+        fileContents.set(filePath, content);
+        stats.scannedFiles++;
+      } catch (err) {
+        console.warn(`   ⚠️  Cannot read: ${filePath}\n       ${err instanceof Error ? err.message : err}`);
         continue;
       }
 
-      if (this.verbose) console.log(`         ❌ Block is invalid: ${result.error}`);
-      invalidBlocks++;
+      const blocks = extractMermaidBlocks(content);
+      if (blocks.length === 0) {
+        if (this.verbose) console.log(`   ℹ️  No mermaid blocks: ${filePath}`);
+        continue;
+      }
 
-      if (!dryRun && this.fixer) {
-        console.log(`         🤖 Sending to AI for fix...`);
-        try {
-          const fixed = await this.fixer.fixMermaid(code);
-          if (fixed && fixed.trim()) {
-            newContent = replaceMermaidBlock(newContent, code, fixed);
-            fixedBlocks++;
-            console.log(`         🔧 Fix applied`);
-          } else {
-            failedFixes++;
-            console.log(`         ⚠️  AI returned empty response — skipping`);
-          }
-        } catch (err) {
-          failedFixes++;
-          console.log(`         ❌ AI fix failed: ${err instanceof Error ? err.message : err}`);
+      stats.totalBlocks += blocks.length;
+
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        const code  = normalizeMermaidSnippet(block.code);
+        const result = validateMermaid(code);
+
+        if (result.valid) {
+          if (this.verbose) console.log(`   ✅ ${filePath} — block ${i + 1}/${blocks.length}: valid`);
+          continue;
+        }
+
+        stats.invalidBlocks++;
+        broken.push({
+          filePath,
+          code,
+          block,
+          blockIndex: i + 1,
+          blockTotal: blocks.length,
+          error: result.error ?? "unknown error",
+        });
+
+        if (this.verbose) {
+          console.log(`   ❌ ${filePath} — block ${i + 1}/${blocks.length}: ${result.error}`);
         }
       }
     }
 
-    if (newContent !== content) {
-      await Deno.writeTextFile(filePath, newContent);
-      if (this.verbose) console.log("   💾 File updated");
+    console.log(`   Mermaid blocks total:  ${stats.totalBlocks}`);
+    console.log(`   Broken blocks found:   ${stats.invalidBlocks}`);
+
+    if (broken.length === 0) {
+      console.log(`\n   ✅ All diagrams look good — nothing to fix.`);
+      return stats;
     }
 
-    return { totalBlocks: blocks.length, invalidBlocks, fixedBlocks, failedFixes };
+    if (dryRun) {
+      console.log(`\n   (dry-run — no changes will be made)`);
+      for (const r of broken) {
+        console.log(`   ❌ ${r.filePath}  block ${r.blockIndex}/${r.blockTotal}: ${r.error}`);
+      }
+      return stats;
+    }
+
+    // ── PHASE 2: Fix with AI ──────────────────────────────────────────────
+    console.log(`\n${BAR}`);
+    console.log("🤖  PHASE 2 — Fixing broken diagrams with AI");
+    console.log(BAR);
+
+    // filePath → list of {block, fixedCode} pairs to write in Phase 3
+    const fixMap = new Map<string, Array<{ block: MermaidBlock; fixedCode: string }>>();
+
+    for (let idx = 0; idx < broken.length; idx++) {
+      const r       = broken[idx];
+      const label   = `[${idx + 1}/${broken.length}]`;
+      const relPath = r.filePath.split("/").slice(-3).join("/");
+
+      console.log(`   ${label} 🔧 ${relPath}  (block ${r.blockIndex}/${r.blockTotal})`);
+      if (this.verbose) console.log(`         error: ${r.error}`);
+
+      try {
+        let fixed      = await this.fixer!.fixMermaid(r.code, r.error);
+        let validation = validateMermaid(fixed);
+
+        if (!validation.valid) {
+          console.log(`         ⚠️  First attempt still invalid — retrying once...`);
+          if (this.verbose) console.log(`         reason: ${validation.error}`);
+          fixed      = await this.fixer!.fixMermaid(fixed, validation.error ?? r.error);
+          validation = validateMermaid(fixed);
+        }
+
+        if (!validation.valid) {
+          stats.failedFixes++;
+          console.log(`         ❌ Still invalid after retry — skipped`);
+          if (this.verbose) console.log(`         reason: ${validation.error}`);
+          continue;
+        }
+
+        if (!fixMap.has(r.filePath)) fixMap.set(r.filePath, []);
+        fixMap.get(r.filePath)!.push({ block: r.block, fixedCode: fixed });
+        stats.fixedBlocks++;
+        console.log(`         ✅ Fixed successfully`);
+      } catch (err) {
+        stats.failedFixes++;
+        console.log(`         ❌ AI error: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    if (fixMap.size === 0) {
+      console.log(`\n   No fixes to write.`);
+      return stats;
+    }
+
+    // ── PHASE 3: Write files ──────────────────────────────────────────────
+    console.log(`\n${BAR}`);
+    console.log("💾  PHASE 3 — Writing fixed files");
+    console.log(BAR);
+
+    for (const [filePath, fixes] of fixMap) {
+      const original = fileContents.get(filePath)!;
+      const updated  = applyFixes(original, fixes);
+      try {
+        await Deno.writeTextFile(filePath, updated);
+        console.log(`   ✅ Written: ${filePath}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`   ❌ Cannot write ${filePath}: ${msg}`);
+        // Roll back fix count since the write failed
+        stats.fixedBlocks -= fixes.length;
+        stats.failedFixes += fixes.length;
+      }
+    }
+
+    return stats;
   }
 }

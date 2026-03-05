@@ -20,18 +20,6 @@ interface ChatResponse {
   choices: Array<{ message: Message }>;
 }
 
-// Expected shape of the JSON returned by the LLM (mirrors prompt.tpl)
-interface FixResponse {
-  fixed_code: string;
-  explanation: string;
-  changes?: Array<{
-    type: string;
-    original: string;
-    fixed: string;
-    reason: string;
-  }>;
-}
-
 // ── AiFixer ───────────────────────────────────────────────────────────────
 
 export class AiFixer {
@@ -51,14 +39,16 @@ export class AiFixer {
     if (requiresApiKey(config.llm.provider) && !this.apiKey) {
       throw new Error(
         `API key required for provider "${config.llm.provider}". ` +
-        `Set it via --llm-api-key, the config file, or the LITHO_LLM_API_KEY env var.`,
+        `Set it via --llm-api-key, the config file, or the LLM_API_KEY env var.`,
       );
     }
   }
 
   /** Send the broken Mermaid code to the LLM and return the fixed version. */
-  async fixMermaid(code: string): Promise<string> {
-    const prompt = PROMPT_TEMPLATE.replace("{{MERMAID_CODE}}", code);
+  async fixMermaid(code: string, validationError?: string): Promise<string> {
+    const prompt = PROMPT_TEMPLATE
+      .replace("{{VALIDATION_ERROR}}", validationError?.trim() || "unknown syntax error")
+      .replace("{{MERMAID_CODE}}", code.trim());
 
     const body: ChatRequest = {
       model:       this.model,
@@ -90,27 +80,35 @@ export class AiFixer {
 
   // ── private helpers ──────────────────────────────────────────────────────
 
-  private extractCode(raw: string): string {
-    const cleaned = this.stripJsonFence(raw);
+  /**
+   * Strip <think>...</think> blocks emitted by reasoning/thinking models
+   * (e.g. Qwen3, DeepSeek-R1).  Must run before any code extraction.
+   */
+  private stripThinkingBlocks(s: string): string {
+    return s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  }
 
-    // 1. Try structured JSON response
+  private extractCode(raw: string): string {
+    // 1. Remove thinking-model reasoning traces
+    const cleaned = this.stripThinkingBlocks(raw);
+
+    // 2. Primary: extract the first ```mermaid … ``` block
+    const mermaidFence = cleaned.match(/`{3,}[ \t]*mermaid[ \t]*\r?\n([\s\S]*?)\r?\n`{3,}/i);
+    if (mermaidFence) {
+      return this.normalizeMermaid(mermaidFence[1]);
+    }
+
+    // 3. Fallback: some models wrap in ```json or plain ```.  Try JSON parse.
+    const jsonStripped = this.stripJsonFence(cleaned);
     try {
-      const parsed = JSON.parse(cleaned) as FixResponse;
+      const parsed = JSON.parse(jsonStripped) as { fixed_code?: string };
       if (parsed.fixed_code) {
-        console.log(`         📋 Fix summary: ${parsed.explanation}`);
-        parsed.changes?.forEach((c, i) =>
-          console.log(`         🔧 Change ${i + 1} [${c.type}]: ${c.reason}`)
-        );
-        return parsed.fixed_code.trim();
+        return this.normalizeMermaid(parsed.fixed_code);
       }
     } catch { /* not JSON */ }
 
-    // 2. Extract ```mermaid … ``` block
-    const m = raw.match(/```mermaid\r?\n([\s\S]*?)```/);
-    if (m) return m[1].trim();
-
-    // 3. Fallback: return raw trimmed content
-    return raw.trim();
+    // 4. Last resort: treat entire response as mermaid code
+    return this.normalizeMermaid(cleaned);
   }
 
   private stripJsonFence(s: string): string {
@@ -120,64 +118,68 @@ export class AiFixer {
     }
     return t;
   }
+
+  /**
+   * Clean common LLM output artifacts from mermaid code:
+   * - Unwrap nested markdown fences (``` / ```mermaid)
+   * - Normalize line endings
+   * - Repair missing newline after declaration ("graph TDNodeA → graph TD\nNodeA")
+   */
+  private normalizeMermaid(s: string): string {
+    let out = s.trim().replace(/\r\n/g, "\n");
+
+    // Unwrap nested fences (some models add them inside fixed_code)
+    for (let i = 0; i < 5; i++) {
+      const fenced = out.match(/^`{3,}[ \t]*(?:mermaid)?[^\n]*\n([\s\S]*?)\n`{3,}[ \t]*$/i);
+      if (!fenced) break;
+      out = fenced[1].trim();
+    }
+
+    // Fix "graph TDClient Browser ..." — missing newline after declaration
+    out = out.replace(
+      /^((?:graph|flowchart)\s+(?:TB|TD|BT|RL|LR))(?=\S)/im,
+      "$1\n",
+    );
+
+    return out.trim();
+  }
 }
 
 // ── Prompt template (embedded so `deno compile` works without external files) ──
 
-const PROMPT_TEMPLATE = `## 🎯 Goal
+const PROMPT_TEMPLATE = `\
+You are a Mermaid diagram syntax fixer. Fix the broken Mermaid code below.
 
-You are a professional **Mermaid diagram syntax checker and repair assistant**.
+VALIDATION ERROR:
+{{VALIDATION_ERROR}}
 
-Analyse the Mermaid code below, identify all syntax errors, and return a **single JSON object** — no other text.
-
-\`\`\`json
-{
-  "fixed_code": "<complete corrected Mermaid code>",
-  "explanation": "<brief summary of issues found and fixes applied>",
-  "changes": [
-    {
-      "type": "syntax_error|node_text|arrow_label|style_declaration|structure",
-      "original": "<original erroneous fragment>",
-      "fixed": "<corrected fragment>",
-      "reason": "<why this was changed>"
-    }
-  ]
-}
-\`\`\`
-
-Mermaid code to fix:
+BROKEN MERMAID CODE:
 \`\`\`mermaid
 {{MERMAID_CODE}}
 \`\`\`
 
----
+FIXING RULES:
+1. Return ONLY the fixed Mermaid code inside a single fenced block — no explanation, no JSON.
+2. The opening fence MUST start at column 0 with no indentation:  \`\`\`mermaid
+3. The closing fence MUST start at column 0 with no indentation:  \`\`\`
+4. Keep edits minimal — only change what is broken. Preserve all node IDs, labels, and business logic.
+5. The diagram type declaration must be alone on line 1 (e.g. "graph TD" alone, then a newline).
+6. Quote arrow labels that contain spaces or special characters: A -- "label here" --> B
+7. For sequenceDiagram: participant declarations and each message arrow must each be on their own line.
+8. For classDiagram: class members must be indented inside the class block.
+9. For gantt: each section and task must be on its own line with correct date format.
+10. For erDiagram: relationship lines follow the pattern: ENTITY1 }|--|| ENTITY2 : "label"
+11. Common fixes:
+    - Missing arrow type: use --> (solid), --- (dotted), ==> (thick)
+    - Unquoted special chars in node labels: wrap in double quotes or ["label"]
+    - Subgraph syntax: subgraph Title\\n  nodes\\nend
+    - Do not use reserved words (end, graph, etc.) as unquoted node IDs
+12. If the code you receive starts with a line like \`\`\`mermaid or \`\`\` (a fence line),
+    that line is NOT part of the diagram — ignore it and use only the actual diagram content
+    that follows. Never include fence lines inside your output block.
 
-## ✅ Rules (follow strictly)
+REQUIRED OUTPUT FORMAT (exactly this, nothing else before or after):
+\`\`\`mermaid
+<fixed mermaid code here>
+\`\`\``;
 
-### 1. Node IDs
-- Letters, digits, underscores only; must not start with a digit.
-
-### 2. Node labels (text inside \`[]\`, \`()\`, \`{}\`, etc.)
-- Must NOT contain: \`( ) [ ] { } < > : , + = |\`
-- Rewrite as a concise English phrase if needed.
-
-### 3. Arrow labels
-- Any label with spaces or special characters MUST be double-quoted.
-  - ✅  \`A -- "cache miss" --> B\`
-  - ❌  \`A -- cache miss --> B\`
-
-### 4. Graph declaration
-- Must start with a valid type: \`graph\`, \`flowchart\`, \`sequenceDiagram\`, \`classDiagram\`, etc.
-
-### 5. Arrow syntax
-- Use valid Mermaid arrows: \`-->\`, \`---\`, \`-.->\`, \`==>\`, etc.
-
-### 6. Style declarations
-- Color values must use: \`fill:#RRGGBB\` format.
-
-### 7. Preserve meaning
-- Keep the original business logic and flow intact.
-
----
-
-Return ONLY the JSON object. Do not add any explanation outside it.`;
