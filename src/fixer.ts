@@ -23,6 +23,7 @@ interface ChatResponse {
 // ── AiFixer ───────────────────────────────────────────────────────────────
 
 export class AiFixer {
+  private readonly syntaxGuidePromise: Promise<string>;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly model: string;
@@ -30,35 +31,40 @@ export class AiFixer {
   private readonly temperature: number;
 
   constructor(config: Config) {
-    this.baseUrl     = getEffectiveBaseUrl(config.llm);
-    this.apiKey      = config.llm.api_key ?? "";
-    this.model       = config.llm.model;
-    this.maxTokens   = config.llm.max_tokens  ?? 4096;
+    this.syntaxGuidePromise = loadSyntaxGuide();
+    this.baseUrl = getEffectiveBaseUrl(config.llm);
+    this.apiKey = config.llm.api_key ?? "";
+    this.model = config.llm.model;
+    this.maxTokens = config.llm.max_tokens ?? 4096;
     this.temperature = config.llm.temperature ?? 0.1;
 
     if (requiresApiKey(config.llm.provider) && !this.apiKey) {
       throw new Error(
         `API key required for provider "${config.llm.provider}". ` +
-        `Set it via --llm-api-key, the config file, or the LLM_API_KEY env var.`,
+          `Set it via --llm-api-key, the config file, or the LLM_API_KEY env var.`,
       );
     }
   }
 
   /** Send the broken Mermaid code to the LLM and return the fixed version. */
   async fixMermaid(code: string, validationError?: string): Promise<string> {
-    const prompt = PROMPT_TEMPLATE
-      .replace("{{VALIDATION_ERROR}}", validationError?.trim() || "unknown syntax error")
-      .replace("{{MERMAID_CODE}}", code.trim());
+    const syntaxGuide = await this.syntaxGuidePromise;
+    const prompt = buildUserPrompt(code, validationError);
 
     const body: ChatRequest = {
-      model:       this.model,
-      messages:    [{ role: "user", content: prompt }],
-      max_tokens:  this.maxTokens,
+      model: this.model,
+      messages: [
+        { role: "system", content: syntaxGuide },
+        { role: "user", content: prompt },
+      ],
+      max_tokens: this.maxTokens,
       temperature: this.temperature,
-      stream:      false,
+      stream: false,
     };
 
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
     if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
 
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -73,7 +79,9 @@ export class AiFixer {
     }
 
     const data = await res.json() as ChatResponse;
-    if (!data.choices?.length) throw new Error("LLM API returned an empty response.");
+    if (!data.choices?.length) {
+      throw new Error("LLM API returned an empty response.");
+    }
 
     return this.extractCode(data.choices[0].message.content);
   }
@@ -93,7 +101,9 @@ export class AiFixer {
     const cleaned = this.stripThinkingBlocks(raw);
 
     // 2. Primary: extract the first ```mermaid … ``` block
-    const mermaidFence = cleaned.match(/`{3,}[ \t]*mermaid[ \t]*\r?\n([\s\S]*?)\r?\n`{3,}/i);
+    const mermaidFence = cleaned.match(
+      /`{3,}[ \t]*mermaid[ \t]*\r?\n([\s\S]*?)\r?\n`{3,}/i,
+    );
     if (mermaidFence) {
       return this.normalizeMermaid(mermaidFence[1]);
     }
@@ -130,7 +140,9 @@ export class AiFixer {
 
     // Unwrap nested fences (some models add them inside fixed_code)
     for (let i = 0; i < 5; i++) {
-      const fenced = out.match(/^`{3,}[ \t]*(?:mermaid)?[^\n]*\n([\s\S]*?)\n`{3,}[ \t]*$/i);
+      const fenced = out.match(
+        /^`{3,}[ \t]*(?:mermaid)?[^\n]*\n([\s\S]*?)\n`{3,}[ \t]*$/i,
+      );
       if (!fenced) break;
       out = fenced[1].trim();
     }
@@ -145,41 +157,59 @@ export class AiFixer {
   }
 }
 
-// ── Prompt template (embedded so `deno compile` works without external files) ──
+async function loadSyntaxGuide(): Promise<string> {
+  for (const path of ["mermaid-syntax.md", "./mermaid-syntax.md"]) {
+    try {
+      const text = await Deno.readTextFile(path);
+      const trimmed = text.trim();
+      if (trimmed) return trimmed;
+    } catch {
+      // Fall through to the embedded fallback.
+    }
+  }
 
-const PROMPT_TEMPLATE = `\
-You are a Mermaid diagram syntax fixer. Fix the broken Mermaid code below.
+  return FALLBACK_SYSTEM_PROMPT;
+}
 
-VALIDATION ERROR:
-{{VALIDATION_ERROR}}
+function buildUserPrompt(code: string, validationError?: string): string {
+  const diagramType = detectDiagramType(code);
+  const errorText = validationError?.trim() || "unknown syntax error";
 
-BROKEN MERMAID CODE:
+  return `\
+Fix this Mermaid diagram so Mermaid can parse it.
+
+Context:
+- Diagram type: ${diagramType}
+- Validation/parser error: ${errorText}
+
+Requirements:
+1. Return only one fenced Mermaid block.
+2. Keep edits minimal. Preserve IDs, labels, and intent unless syntax requires a change.
+3. Keep the diagram type declaration on line 1 only.
+4. For flowchart edge labels, use official pipe syntax: A -->|label| B.
+5. If labels contain punctuation or reserved words, quote the label text safely.
+6. Do not include explanations, JSON, or prose outside the code fence.
+
+Broken Mermaid code:
 \`\`\`mermaid
-{{MERMAID_CODE}}
-\`\`\`
-
-FIXING RULES:
-1. Return ONLY the fixed Mermaid code inside a single fenced block — no explanation, no JSON.
-2. The opening fence MUST start at column 0 with no indentation:  \`\`\`mermaid
-3. The closing fence MUST start at column 0 with no indentation:  \`\`\`
-4. Keep edits minimal — only change what is broken. Preserve all node IDs, labels, and business logic.
-5. The diagram type declaration must be alone on line 1 (e.g. "graph TD" alone, then a newline).
-6. Quote arrow labels that contain spaces or special characters: A -- "label here" --> B
-7. For sequenceDiagram: participant declarations and each message arrow must each be on their own line.
-8. For classDiagram: class members must be indented inside the class block.
-9. For gantt: each section and task must be on its own line with correct date format.
-10. For erDiagram: relationship lines follow the pattern: ENTITY1 }|--|| ENTITY2 : "label"
-11. Common fixes:
-    - Missing arrow type: use --> (solid), --- (dotted), ==> (thick)
-    - Unquoted special chars in node labels: wrap in double quotes or ["label"]
-    - Subgraph syntax: subgraph Title\\n  nodes\\nend
-    - Do not use reserved words (end, graph, etc.) as unquoted node IDs
-12. If the code you receive starts with a line like \`\`\`mermaid or \`\`\` (a fence line),
-    that line is NOT part of the diagram — ignore it and use only the actual diagram content
-    that follows. Never include fence lines inside your output block.
-
-REQUIRED OUTPUT FORMAT (exactly this, nothing else before or after):
-\`\`\`mermaid
-<fixed mermaid code here>
+${code.trim()}
 \`\`\``;
+}
 
+function detectDiagramType(code: string): string {
+  const firstLine = code.trim().split("\n", 1)[0]?.trim();
+  if (!firstLine) return "unknown";
+  return firstLine.split(/\s+/)[0];
+}
+
+const FALLBACK_SYSTEM_PROMPT = `\
+You are a Mermaid diagram syntax fixer.
+
+Rules:
+1. Output only a single \`\`\`mermaid fenced block.
+2. Preserve business meaning and change only what syntax requires.
+3. The first line must be the Mermaid diagram declaration.
+4. For flowcharts, edge labels use pipe syntax like A -->|label| B.
+5. Quote unsafe label text when needed.
+6. Avoid bare reserved words like end as node IDs or labels.
+7. Never include explanations outside the fence.`;

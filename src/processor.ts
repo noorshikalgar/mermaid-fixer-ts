@@ -3,41 +3,41 @@ import { MarkdownScanner } from "./scanner.ts";
 import { validateMermaid } from "./validator.ts";
 import { AiFixer } from "./fixer.ts";
 import {
-  type MermaidBlock,
   applyFixes,
   extractMermaidBlocks,
+  type MermaidBlock,
   normalizeMermaidSnippet,
 } from "./utils.ts";
 
 export interface ProcessStats {
-  totalFiles:    number;
-  scannedFiles:  number;
-  totalBlocks:   number;
+  totalFiles: number;
+  scannedFiles: number;
+  totalBlocks: number;
   invalidBlocks: number;
-  fixedBlocks:   number;
-  failedFixes:   number;
+  fixedBlocks: number;
+  failedFixes: number;
 }
 
 // Internal record for a single broken block across phases
 interface BrokenRecord {
-  filePath:     string;
-  code:         string;        // normalized code sent to AI
-  block:        MermaidBlock;  // original block with character offsets
-  blockIndex:   number;        // 1-based index within the file
-  blockTotal:   number;        // total blocks in the file
-  error:        string;
+  filePath: string;
+  code: string; // normalized code sent to AI
+  block: MermaidBlock; // original block with character offsets
+  blockIndex: number; // 1-based index within the file
+  blockTotal: number; // total blocks in the file
+  error: string;
 }
 
 const BAR = "━".repeat(56);
 
 export class MermaidProcessor {
   private scanner: MarkdownScanner;
-  private fixer:   AiFixer | null;
+  private fixer: AiFixer | null;
   private verbose: boolean;
 
   constructor(config: Config, dryRun: boolean, verbose: boolean) {
     this.scanner = new MarkdownScanner(config.scan.exclude_patterns ?? []);
-    this.fixer   = dryRun ? null : new AiFixer(config);
+    this.fixer = dryRun ? null : new AiFixer(config);
     this.verbose = verbose;
   }
 
@@ -51,12 +51,12 @@ export class MermaidProcessor {
     console.log(`   Found ${files.length} markdown file(s) in directory`);
 
     const stats: ProcessStats = {
-      totalFiles:    files.length,
-      scannedFiles:  0,
-      totalBlocks:   0,
+      totalFiles: files.length,
+      scannedFiles: 0,
+      totalBlocks: 0,
       invalidBlocks: 0,
-      fixedBlocks:   0,
-      failedFixes:   0,
+      fixedBlocks: 0,
+      failedFixes: 0,
     };
 
     // Cache file contents so we don't re-read in Phase 3
@@ -70,7 +70,11 @@ export class MermaidProcessor {
         fileContents.set(filePath, content);
         stats.scannedFiles++;
       } catch (err) {
-        console.warn(`   ⚠️  Cannot read: ${filePath}\n       ${err instanceof Error ? err.message : err}`);
+        console.warn(
+          `   ⚠️  Cannot read: ${filePath}\n       ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
         continue;
       }
 
@@ -84,11 +88,15 @@ export class MermaidProcessor {
 
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
-        const code  = normalizeMermaidSnippet(block.code);
-        const result = validateMermaid(code);
+        const code = normalizeMermaidSnippet(block.code);
+        const result = await validateMermaid(code);
 
         if (result.valid) {
-          if (this.verbose) console.log(`   ✅ ${filePath} — block ${i + 1}/${blocks.length}: valid`);
+          if (this.verbose) {
+            console.log(
+              `   ✅ ${filePath} — block ${i + 1}/${blocks.length}: valid`,
+            );
+          }
           continue;
         }
 
@@ -103,7 +111,11 @@ export class MermaidProcessor {
         });
 
         if (this.verbose) {
-          console.log(`   ❌ ${filePath} — block ${i + 1}/${blocks.length}: ${result.error}`);
+          console.log(
+            `   ❌ ${filePath} — block ${
+              i + 1
+            }/${blocks.length}: ${result.error}`,
+          );
         }
       }
     }
@@ -119,7 +131,9 @@ export class MermaidProcessor {
     if (dryRun) {
       console.log(`\n   (dry-run — no changes will be made)`);
       for (const r of broken) {
-        console.log(`   ❌ ${r.filePath}  block ${r.blockIndex}/${r.blockTotal}: ${r.error}`);
+        console.log(
+          `   ❌ ${r.filePath}  block ${r.blockIndex}/${r.blockTotal}: ${r.error}`,
+        );
       }
       return stats;
     }
@@ -130,41 +144,32 @@ export class MermaidProcessor {
     console.log(BAR);
 
     // filePath → list of {block, fixedCode} pairs to write in Phase 3
-    const fixMap = new Map<string, Array<{ block: MermaidBlock; fixedCode: string }>>();
+    const fixMap = new Map<
+      string,
+      Array<{ block: MermaidBlock; fixedCode: string }>
+    >();
 
     for (let idx = 0; idx < broken.length; idx++) {
-      const r       = broken[idx];
-      const label   = `[${idx + 1}/${broken.length}]`;
+      const r = broken[idx];
+      const label = `[${idx + 1}/${broken.length}]`;
       const relPath = r.filePath.split("/").slice(-3).join("/");
 
-      console.log(`   ${label} 🔧 ${relPath}  (block ${r.blockIndex}/${r.blockTotal})`);
+      console.log(
+        `   ${label} 🔧 ${relPath}  (block ${r.blockIndex}/${r.blockTotal})`,
+      );
       if (this.verbose) console.log(`         error: ${r.error}`);
 
       try {
-        let fixed      = await this.fixer!.fixMermaid(r.code, r.error);
-        let validation = validateMermaid(fixed);
-
-        if (!validation.valid) {
-          console.log(`         ⚠️  First attempt still invalid — retrying once...`);
-          if (this.verbose) console.log(`         reason: ${validation.error}`);
-          fixed      = await this.fixer!.fixMermaid(fixed, validation.error ?? r.error);
-          validation = validateMermaid(fixed);
-        }
-
-        if (!validation.valid) {
-          stats.failedFixes++;
-          console.log(`         ❌ Still invalid after retry — skipped`);
-          if (this.verbose) console.log(`         reason: ${validation.error}`);
-          continue;
-        }
-
+        const fixed = await this.fixer!.fixMermaid(r.code, r.error);
         if (!fixMap.has(r.filePath)) fixMap.set(r.filePath, []);
         fixMap.get(r.filePath)!.push({ block: r.block, fixedCode: fixed });
         stats.fixedBlocks++;
-        console.log(`         ✅ Fixed successfully`);
+        console.log(`         ✅ LLM returned replacement`);
       } catch (err) {
         stats.failedFixes++;
-        console.log(`         ❌ AI error: ${err instanceof Error ? err.message : err}`);
+        console.log(
+          `         ❌ AI error: ${err instanceof Error ? err.message : err}`,
+        );
       }
     }
 
@@ -180,7 +185,7 @@ export class MermaidProcessor {
 
     for (const [filePath, fixes] of fixMap) {
       const original = fileContents.get(filePath)!;
-      const updated  = applyFixes(original, fixes);
+      const updated = applyFixes(original, fixes);
       try {
         await Deno.writeTextFile(filePath, updated);
         console.log(`   ✅ Written: ${filePath}`);
