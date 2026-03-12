@@ -14,16 +14,22 @@ export interface MermaidBlock {
   end: number;
 }
 
+export interface BlockLocation {
+  line: number;
+  column: number;
+}
+
 /** Extract all ```mermaid … ``` blocks from Markdown content, with position metadata. */
 export function extractMermaidBlocks(content: string): MermaidBlock[] {
   const blocks: MermaidBlock[] = [];
   // Handles optional indentation on fences and Windows line endings.
-  const re = /^([ \t]*`{3,}[ \t]*mermaid[ \t]*)\r?\n([\s\S]*?)^([ \t]*`{3,}[ \t]*)$/gm;
+  const re =
+    /^([ \t]*`{3,}[ \t]*mermaid[ \t]*)\r?\n([\s\S]*?)^([ \t]*`{3,}[ \t]*)$/gm;
 
   let m: RegExpExecArray | null;
   while ((m = re.exec(content)) !== null) {
     let code = m[2].replace(/\r\n/g, "\n").trimEnd();
-    let end  = m.index + m[0].length;
+    let end = m.index + m[0].length;
 
     // Double-fence pattern: the captured body starts with another fence line
     // e.g.  ```mermaid\n```mermaid\ngraph LR\n...\n```\n```
@@ -36,8 +42,8 @@ export function extractMermaidBlocks(content: string): MermaidBlock[] {
       let rest = content.slice(end);
       let extra: RegExpMatchArray | null;
       while ((extra = rest.match(/^[ \t]*`{3,}[ \t]*(?:\r?\n|$)/)) !== null) {
-        end  += extra[0].length;
-        rest  = content.slice(end);
+        end += extra[0].length;
+        rest = content.slice(end);
       }
     }
 
@@ -56,9 +62,9 @@ export function normalizeMermaidSnippet(code: string): string {
     if (lines.length < 2) break;
 
     const first = lines[0].trim();
-    const last  = lines[lines.length - 1].trim();
+    const last = lines[lines.length - 1].trim();
     const isFenceStart = /^`{3,}/.test(first);
-    const isFenceEnd   = /^`{3,}[ \t]*$/.test(last);
+    const isFenceEnd = /^`{3,}[ \t]*$/.test(last);
 
     if (isFenceStart && isFenceEnd) {
       // Fully wrapped — strip both fences
@@ -83,6 +89,17 @@ export function buildReplacementBlock(fixedCode: string): string {
   return "```mermaid\n" + fixedCode.trim() + "\n```";
 }
 
+export function buildReplacementBlockFor(
+  block: MermaidBlock,
+  fixedCode: string,
+): string {
+  const indent = block.fence.match(/^[ \t]*/)?.[0] ?? "";
+  const body = fixedCode.trim().split("\n").map((line) =>
+    line.length > 0 ? `${indent}${line}` : line
+  ).join("\n");
+  return `${indent}\`\`\`mermaid\n${body}\n${indent}\`\`\``;
+}
+
 /**
  * Apply multiple fixes to a document in a single pass.
  * All blocks must reference positions in the SAME original content string.
@@ -96,10 +113,22 @@ export function applyFixes(
   const sorted = [...fixes].sort((a, b) => b.block.start - a.block.start);
   let result = content;
   for (const { block, fixedCode } of sorted) {
-    const replacement = buildReplacementBlock(fixedCode);
-    result = result.slice(0, block.start) + replacement + result.slice(block.end);
+    const replacement = buildReplacementBlockFor(block, fixedCode);
+    result = result.slice(0, block.start) + replacement +
+      result.slice(block.end);
   }
   return result;
+}
+
+export function getLineColumn(content: string, offset: number): BlockLocation {
+  const safeOffset = Math.max(0, Math.min(offset, content.length));
+  const slice = content.slice(0, safeOffset);
+  const lines = slice.split("\n");
+
+  return {
+    line: lines.length,
+    column: (lines.at(-1)?.length ?? 0) + 1,
+  };
 }
 
 /** Print a final statistics summary. */

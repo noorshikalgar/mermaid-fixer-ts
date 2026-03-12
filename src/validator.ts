@@ -1,50 +1,8 @@
-import mermaid from "npm:mermaid";
-
-/**
- * Mermaid parser wrapper.
- *
- * This is intentionally strict and simple: if Mermaid parse throws for any
- * reason, the block is treated as broken and may be sent to the LLM.
- */
-
-// Common Mermaid diagram types supported by recent Mermaid releases.
-const VALID_TYPES = new Set([
-  "graph",
-  "flowchart",
-  "sequencediagram",
-  "classdiagram",
-  "statediagram",
-  "statediagram-v2",
-  "erdiagram",
-  "gantt",
-  "pie",
-  "gitgraph",
-  "mindmap",
-  "kanban",
-  "timeline",
-  "xychart-beta",
-  "quadrantchart",
-  "requirementdiagram",
-  "c4context",
-  "c4container",
-  "c4component",
-  "c4dynamic",
-  "c4deployment",
-  "journey",
-  "block-beta",
-  "packet",
-  "architecture-beta",
-  "zenuml",
-  "sankey-beta",
-  "radar-beta",
-  "treemap-beta",
-  "venn-beta",
-]);
+import { JSDOM } from "jsdom";
 
 export type ValidationErrorType =
   | "EMPTY"
   | "MISSING_TYPE"
-  | "UNKNOWN_TYPE"
   | "EMPTY_BODY"
   | "SYNTAX_HINT";
 
@@ -54,33 +12,31 @@ export interface ValidationResult {
   errorType?: ValidationErrorType;
 }
 
+type MermaidModule = typeof import("mermaid");
+
+let mermaidPromise: Promise<MermaidModule["default"]> | null = null;
+let validatorVerbose = false;
+
+export function setValidatorVerbose(enabled: boolean): void {
+  validatorVerbose = enabled;
+}
+
 export async function validateMermaid(code: string): Promise<ValidationResult> {
   const trimmed = code.trim();
+  let parseError = "";
 
   if (!trimmed) {
     return { valid: false, error: "Empty Mermaid block.", errorType: "EMPTY" };
   }
 
   const lines = trimmed.split("\n");
-  const firstLine = lines[0].trim().toLowerCase();
+  const firstLine = lines[0]?.trim() ?? "";
 
   if (!firstLine) {
     return {
       valid: false,
       error: "Diagram has no type declaration on the first line.",
       errorType: "MISSING_TYPE",
-    };
-  }
-
-  // First token (strip trailing colon used by e.g. "gitGraph:")
-  const firstToken = firstLine.split(/\s+/)[0].replace(/:$/, "");
-
-  if (!VALID_TYPES.has(firstToken)) {
-    return {
-      valid: false,
-      error: `Unknown diagram type "${firstToken}". ` +
-        `Expected one of: graph, flowchart, sequenceDiagram, classDiagram, stateDiagram, erDiagram, gantt, pie, gitGraph, mindmap, …`,
-      errorType: "UNKNOWN_TYPE",
     };
   }
 
@@ -99,16 +55,88 @@ export async function validateMermaid(code: string): Promise<ValidationResult> {
   }
 
   try {
-    await mermaid.parse(trimmed);
+    const mermaid = await getMermaid();
+    mermaid.parseError = (error) => {
+      parseError = typeof error === "string" ? error : String(error);
+      if (validatorVerbose) {
+        console.error("[mermaid.parseError]", parseError);
+      }
+    };
+
+    if (validatorVerbose) {
+      console.error("[mermaid.validate] input:");
+      console.error(trimmed);
+    }
+
+    const result = await mermaid.parse(trimmed);
+    if (validatorVerbose) {
+      console.error("[mermaid.parse] returned:", result);
+    }
+
     return { valid: true };
   } catch (err) {
+    if (validatorVerbose) {
+      console.error("[mermaid.parse] threw:", err);
+    }
+    const message = parseError || (err instanceof Error ? err.message : String(err));
     return {
       valid: false,
-      error: (err instanceof Error ? err.message : String(err)).replace(
-        /^Error:\s*/,
-        "",
-      ).trim(),
+      error: message.replace(/^Error:\s*/, "").trim(),
       errorType: "SYNTAX_HINT",
     };
+  }
+}
+
+async function getMermaid(): Promise<MermaidModule["default"]> {
+  if (!mermaidPromise) {
+    mermaidPromise = loadMermaid();
+  }
+  return mermaidPromise;
+}
+
+async function loadMermaid(): Promise<MermaidModule["default"]> {
+  const { window } = new JSDOM("", { pretendToBeVisual: true });
+  defineGlobal("window", window as unknown as Window & typeof globalThis);
+  defineGlobal("document", window.document);
+  defineGlobal("navigator", window.navigator);
+  defineGlobal("DOMParser", window.DOMParser);
+  defineGlobal("Element", window.Element);
+  defineGlobal("HTMLElement", window.HTMLElement);
+  defineGlobal("Node", window.Node);
+
+  const mermaid = (await import("mermaid")).default;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+  });
+
+  return mermaid;
+}
+
+function defineGlobal(name: string, value: unknown): void {
+  const existing = Object.getOwnPropertyDescriptor(globalThis, name);
+
+  if (!existing) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+    return;
+  }
+
+  if (existing.configurable) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+    return;
+  }
+
+  try {
+    Reflect.set(globalThis, name, value);
+  } catch {
+    // Leave built-in read-only globals as-is.
   }
 }
