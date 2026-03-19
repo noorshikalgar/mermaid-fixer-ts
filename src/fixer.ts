@@ -44,11 +44,7 @@ export class AiFixer {
     if (requiresApiKey(config.llm.provider) && !this.apiKey) {
       throw new Error(
         `API key required for provider "${config.llm.provider}". ` +
-<<<<<<< dev
           `Set it via --llm-api-key, the config file, MERMAID_FIXER_LLM_API_KEY, or LLM_API_KEY.`,
-=======
-          `Set it via --llm-api-key, the config file, or the LLM_API_KEY env var.`,
->>>>>>> main
       );
     }
   }
