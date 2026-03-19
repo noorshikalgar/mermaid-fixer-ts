@@ -21,7 +21,7 @@ jobs:
             asset: mermaid-fixer-mac-arm64
             output: dist/mermaid-fixer-mac-arm64
           - label: mac-x64
-            runner: macos-13
+            runner: macos-latest
             asset: mermaid-fixer-mac-x64
             output: dist/mermaid-fixer-mac-x64
           - label: linux-x64
