@@ -20,22 +20,18 @@ jobs:
             runner: macos-14
             asset: mermaid-fixer-mac-arm64
             output: dist/mermaid-fixer-mac-arm64
-            postject_args: "--macho-segment-name NODE_SEA"
           - label: mac-x64
             runner: macos-13
             asset: mermaid-fixer-mac-x64
             output: dist/mermaid-fixer-mac-x64
-            postject_args: "--macho-segment-name NODE_SEA"
           - label: linux-x64
             runner: ubuntu-latest
             asset: mermaid-fixer-linux-x64
             output: dist/mermaid-fixer-linux-x64
-            postject_args: ""
           - label: windows-x64
             runner: windows-latest
             asset: mermaid-fixer-windows-x64.exe
             output: dist/mermaid-fixer-windows-x64.exe
-            postject_args: ""
 
     steps:
       - name: Checkout

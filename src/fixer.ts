@@ -252,8 +252,11 @@ function sanitizeMermaidLine(
   out = out.replace(/^(\s*)SubGraph\b/, "$1subgraph");
   out = out.replace(/^(\s*)End\s*$/, "$1end");
   if (diagramType !== "sequenceDiagram") {
+    out = out.replace(/-\.\s*-->\s*\|/g, "-.->|");
+    out = out.replace(/-\.\s*-->(?!\|)/g, "-.->");
     out = out.replace(/-\.\s*->\|/g, "-.->|");
     out = out.replace(/-\.\s*->(?![>\|])/g, "-.->");
+    out = out.replace(/==\s+([A-Za-z][A-Za-z0-9_]*(?:\[[^\]\n]+\]|\([^)]+\)|\{[^}\n]+\})?)/g, "==> $1");
     out = out.replace(/(?<![-.])->\|/g, "-->|");
     out = out.replace(/\s->\s/g, " --> ");
   }
@@ -274,6 +277,7 @@ function sanitizeMermaidLine(
   out = sanitizeSequenceTargetLabel(out);
   out = sanitizeBareDoubleDash(out);
   out = sanitizeMultiTargetEdge(out);
+  out = sanitizeTrailingNodeDeclaration(out);
   out = sanitizeArrowTargetWithPseudoLabel(out, seenIds);
   out = sanitizeStyleLine(out, seenIds);
   out = sanitizeAllEdgeLabels(out);
@@ -478,6 +482,15 @@ function sanitizeMultiTargetEdge(line: string): string {
   const targets = match[2].trim().split(/\s+/);
   if (targets.length < 2) return line;
   return targets.map((target) => `${prefix}${target}`).join("\n");
+}
+
+function sanitizeTrailingNodeDeclaration(line: string): string {
+  const match = line.match(
+    /^(\s*[A-Za-z][A-Za-z0-9_]*\s*(?:-->|-.->|==>)\s*(?:\|[^|]*\|\s*)?[A-Za-z][A-Za-z0-9_]*)(\s+)([A-Za-z][A-Za-z0-9_]*(?:\[[^\]\n]+\]|\([^)]+\)|\{[^}\n]+\}))\s*$/u,
+  );
+  if (!match) return line;
+
+  return `${match[1]}\n${match[3]}`;
 }
 
 function sanitizeAllEdgeLabels(line: string): string {
