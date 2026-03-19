@@ -326,11 +326,7 @@ path = ""
 
 Environment variable support:
 
-<<<<<<< dev
 - `MERMAID_FIXER_LLM_API_KEY`
-=======
-- `LITHO_LLM_API_KEY`
->>>>>>> main
 - `LLM_API_KEY`
 
 These are used if `api_key` is not already set in config or via CLI flag.
