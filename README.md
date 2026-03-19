@@ -304,11 +304,7 @@ language = "en"
 # Provider: ollama, openai, mistral, deepseek, or any OpenAI-compatible endpoint
 provider = "ollama"
 model    = "qwen3.5:9b"
-<<<<<<< dev
 # api_key = "your-key"   # or set MERMAID_FIXER_LLM_API_KEY / LLM_API_KEY
-=======
-# api_key = "your-key"   # or set LITHO_LLM_API_KEY / LLM_API_KEY
->>>>>>> main
 # base_url = ""          # defaults are applied per provider
 max_tokens  = 4096
 temperature = 0.1
