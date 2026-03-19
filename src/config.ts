@@ -147,7 +147,7 @@ export async function loadConfig(path: string): Promise<Config> {
 
   // Environment variable overrides for API key
   if (!config.llm.api_key) {
-    config.llm.api_key = process.env.LITHO_LLM_API_KEY ??
+    config.llm.api_key = process.env.MERMAID_FIXER_LLM_API_KEY ??
       process.env.LLM_API_KEY;
   }
 
@@ -174,7 +174,7 @@ language = "${c.language}"
 # Provider: ollama, openai, mistral, deepseek, or any OpenAI-compatible endpoint
 provider = "${c.llm.provider}"
 model    = "${c.llm.model}"
-# api_key = "your-key"   # or set LITHO_LLM_API_KEY env var (not needed for ollama)
+# api_key = "your-key"   # or set MERMAID_FIXER_LLM_API_KEY env var (not needed for ollama)
 # base_url = ""          # defaults: ollama=http://localhost:11434/v1  openai=https://api.openai.com/v1
 max_tokens  = ${c.llm.max_tokens}
 temperature = ${c.llm.temperature}
