@@ -1,43 +1,8 @@
-/**
- * Mermaid diagram validator.
- *
- * Uses a fast, zero-dependency structural approach:
- *  1. Checks the diagram has a recognised type declaration.
- *  2. Checks the body has actual content.
- *  3. Runs lightweight flowchart-specific checks.
- *
- * This avoids the false-positive problem seen with headless-Chrome-based
- * validators (e.g. mermaid-rs) that flag perfectly valid diagrams.
- */
-
-// All diagram types recognised by Mermaid ≥ 10
-const VALID_TYPES = new Set([
-  "graph", "flowchart",
-  "sequencediagram",
-  "classdiagram",
-  "statediagram", "statediagram-v2",
-  "erdiagram",
-  "gantt",
-  "pie",
-  "gitgraph",
-  "mindmap",
-  "timeline",
-  "xychart-beta",
-  "quadrantchart",
-  "requirementdiagram",
-  "c4context", "c4container", "c4component", "c4dynamic", "c4deployment",
-  "journey",
-  "block-beta",
-  "packet-beta",
-  "architecture-beta",
-  "zenuml",
-  "sankey-beta",
-]);
+import { JSDOM } from "jsdom";
 
 export type ValidationErrorType =
   | "EMPTY"
   | "MISSING_TYPE"
-  | "UNKNOWN_TYPE"
   | "EMPTY_BODY"
   | "SYNTAX_HINT";
 
@@ -47,29 +12,31 @@ export interface ValidationResult {
   errorType?: ValidationErrorType;
 }
 
-export function validateMermaid(code: string): ValidationResult {
+type MermaidModule = typeof import("mermaid");
+
+let mermaidPromise: Promise<MermaidModule["default"]> | null = null;
+let validatorVerbose = false;
+
+export function setValidatorVerbose(enabled: boolean): void {
+  validatorVerbose = enabled;
+}
+
+export async function validateMermaid(code: string): Promise<ValidationResult> {
   const trimmed = code.trim();
+  let parseError = "";
 
   if (!trimmed) {
     return { valid: false, error: "Empty Mermaid block.", errorType: "EMPTY" };
   }
 
   const lines = trimmed.split("\n");
-  const firstLine = lines[0].trim().toLowerCase();
+  const firstLine = lines[0]?.trim() ?? "";
 
   if (!firstLine) {
-    return { valid: false, error: "Diagram has no type declaration on the first line.", errorType: "MISSING_TYPE" };
-  }
-
-  // First token (strip trailing colon used by e.g. "gitGraph:")
-  const firstToken = firstLine.split(/\s+/)[0].replace(/:$/, "");
-
-  if (!VALID_TYPES.has(firstToken)) {
     return {
       valid: false,
-      error: `Unknown diagram type "${firstToken}". ` +
-        `Expected one of: graph, flowchart, sequenceDiagram, classDiagram, stateDiagram, erDiagram, gantt, pie, gitGraph, mindmap, …`,
-      errorType: "UNKNOWN_TYPE",
+      error: "Diagram has no type declaration on the first line.",
+      errorType: "MISSING_TYPE",
     };
   }
 
@@ -87,45 +54,89 @@ export function validateMermaid(code: string): ValidationResult {
     };
   }
 
-  // Extra checks for flowchart / graph diagrams
-  if (firstToken === "graph" || firstToken === "flowchart") {
-    const err = checkFlowchart(body);
-    if (err) return { valid: false, error: err, errorType: "SYNTAX_HINT" };
-  }
+  try {
+    const mermaid = await getMermaid();
+    mermaid.parseError = (error) => {
+      parseError = typeof error === "string" ? error : String(error);
+      if (validatorVerbose) {
+        console.error("[mermaid.parseError]", parseError);
+      }
+    };
 
-  return { valid: true };
+    if (validatorVerbose) {
+      console.error("[mermaid.validate] input:");
+      console.error(trimmed);
+    }
+
+    const result = await mermaid.parse(trimmed);
+    if (validatorVerbose) {
+      console.error("[mermaid.parse] returned:", result);
+    }
+
+    return { valid: true };
+  } catch (err) {
+    if (validatorVerbose) {
+      console.error("[mermaid.parse] threw:", err);
+    }
+    const message = parseError || (err instanceof Error ? err.message : String(err));
+    return {
+      valid: false,
+      error: message.replace(/^Error:\s*/, "").trim(),
+      errorType: "SYNTAX_HINT",
+    };
+  }
 }
 
-/**
- * Lightweight flowchart checks.
- * Flags the most common real errors without producing false positives.
- */
-function checkFlowchart(bodyLines: string[]): string | null {
-  for (const line of bodyLines) {
-    const t = line.trim();
-
-    // Skip meta-lines
-    if (
-      !t ||
-      t.startsWith("%%") ||
-      t.startsWith("style ") ||
-      t.startsWith("classDef ") ||
-      t.startsWith("class ") ||
-      t.startsWith("click ") ||
-      t.startsWith("subgraph") ||
-      t === "end"
-    ) continue;
-
-    // Arrow label with spaces or CJK chars that isn't quoted
-    // Matches:  -- label -->  or  -- label ---  where label is not double-quoted
-    const m = t.match(/--\s+([^"\s\-|>][^\-|>]*?)\s+(-{1,2}>|---)/);
-    if (m) {
-      const label = m[1].trim();
-      // Only flag if it contains whitespace or non-ASCII (CJK etc.)
-      if (/[\s\u4e00-\u9fff\u3040-\u30ff]/.test(label)) {
-        return `Arrow label "${label}" contains spaces or non-ASCII characters — wrap it in double quotes, e.g. -- "${label}" -->`;
-      }
-    }
+async function getMermaid(): Promise<MermaidModule["default"]> {
+  if (!mermaidPromise) {
+    mermaidPromise = loadMermaid();
   }
-  return null;
+  return mermaidPromise;
+}
+
+async function loadMermaid(): Promise<MermaidModule["default"]> {
+  const { window } = new JSDOM("", { pretendToBeVisual: true });
+  defineGlobal("window", window as unknown as Window & typeof globalThis);
+  defineGlobal("document", window.document);
+  defineGlobal("navigator", window.navigator);
+  defineGlobal("DOMParser", window.DOMParser);
+  defineGlobal("Element", window.Element);
+  defineGlobal("HTMLElement", window.HTMLElement);
+  defineGlobal("Node", window.Node);
+
+  const mermaid = (await import("mermaid")).default;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+  });
+
+  return mermaid;
+}
+
+function defineGlobal(name: string, value: unknown): void {
+  const existing = Object.getOwnPropertyDescriptor(globalThis, name);
+
+  if (!existing) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+    return;
+  }
+
+  if (existing.configurable) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+    return;
+  }
+
+  try {
+    Reflect.set(globalThis, name, value);
+  } catch {
+    // Leave built-in read-only globals as-is.
+  }
 }

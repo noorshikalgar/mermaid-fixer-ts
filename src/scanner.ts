@@ -1,11 +1,21 @@
-import { extname, join } from "@std/path";
+import { readdir } from "node:fs/promises";
+import { extname, join } from "node:path";
 
 const SKIP_DIRS = new Set([
-  ".git", ".svn", ".hg",
-  "node_modules", "target", "build", "dist",
-  ".vscode", ".idea", ".vs",
-  "__pycache__", ".pytest_cache",
-  "vendor", "deps",
+  ".git",
+  ".svn",
+  ".hg",
+  "node_modules",
+  "target",
+  "build",
+  "dist",
+  ".vscode",
+  ".idea",
+  ".vs",
+  "__pycache__",
+  ".pytest_cache",
+  "vendor",
+  "deps",
 ]);
 
 export class MarkdownScanner {
@@ -27,25 +37,26 @@ export class MarkdownScanner {
   async scanDirectory(dir: string): Promise<string[]> {
     const files: string[] = [];
     await this.walk(dir, files);
-    return files;
+    return files.sort();
   }
 
   private async walk(dir: string, out: string[]): Promise<void> {
-    let entries: Deno.DirEntry[];
+    let entries;
     try {
-      entries = [];
-      for await (const e of Deno.readDir(dir)) entries.push(e);
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       return; // unreadable directory — skip silently
     }
 
     for (const entry of entries) {
       const full = join(dir, entry.name);
-      if (entry.isDirectory) {
+      if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name)) await this.walk(full, out);
-      } else if (entry.isFile) {
+      } else if (entry.isFile()) {
         const ext = extname(entry.name).toLowerCase();
-        if ((ext === ".md" || ext === ".markdown") && !this.isExcluded(entry.name)) {
+        if (
+          (ext === ".md" || ext === ".markdown") && !this.isExcluded(entry.name)
+        ) {
           out.push(full);
         }
       }

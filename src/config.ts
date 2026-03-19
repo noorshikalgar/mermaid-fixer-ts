@@ -1,5 +1,8 @@
-import { parse as parseToml } from "@std/toml";
-import { exists } from "@std/fs";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { parse as parseToml } from "smol-toml";
 
 export interface LlmConfig {
   provider: string;
@@ -19,11 +22,20 @@ export interface ScanConfig {
   exclude_patterns?: string[];
 }
 
+export interface ReportConfig {
+  path?: string;
+}
+
 export interface Config {
   language: string;
   llm: LlmConfig;
   mermaid: MermaidConfig;
   scan: ScanConfig;
+  report: ReportConfig;
+}
+
+export function getDefaultConfigPath(): string {
+  return join(getAppConfigDir(), "config.toml");
 }
 
 export function getDefaultConfig(): Config {
@@ -42,6 +54,9 @@ export function getDefaultConfig(): Config {
     scan: {
       exclude_patterns: [],
     },
+    report: {
+      path: "",
+    },
   };
 }
 
@@ -49,11 +64,16 @@ export function getDefaultConfig(): Config {
 export function getEffectiveBaseUrl(llm: LlmConfig): string {
   if (llm.base_url) return llm.base_url;
   switch (llm.provider.toLowerCase()) {
-    case "ollama":   return "http://localhost:11434/v1";
-    case "openai":   return "https://api.openai.com/v1";
-    case "deepseek": return "https://api.deepseek.com/v1";
-    case "mistral":  return "https://api.mistral.ai/v1";
-    default:         return "http://localhost:11434/v1";
+    case "ollama":
+      return "http://localhost:11434/v1";
+    case "openai":
+      return "https://api.openai.com/v1";
+    case "deepseek":
+      return "https://api.deepseek.com/v1";
+    case "mistral":
+      return "https://api.mistral.ai/v1";
+    default:
+      return "http://localhost:11434/v1";
   }
 }
 
@@ -62,33 +82,87 @@ export function requiresApiKey(provider: string): boolean {
   return !["ollama"].includes(provider.toLowerCase());
 }
 
+export function getDefaultReportPath(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return join(getAppStateDir(), "reports", `mermaid-fixer-report-${stamp}.json`);
+}
+
+function getAppConfigDir(): string {
+  if (process.platform === "win32") {
+    return join(
+      process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"),
+      "mermaid-fixer-ts",
+    );
+  }
+
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "mermaid-fixer-ts");
+  }
+
+  return join(
+    process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+    "mermaid-fixer-ts",
+  );
+}
+
+function getAppStateDir(): string {
+  if (process.platform === "win32") {
+    return join(
+      process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"),
+      "mermaid-fixer-ts",
+    );
+  }
+
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "mermaid-fixer-ts");
+  }
+
+  return join(
+    process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
+    "mermaid-fixer-ts",
+  );
+}
+
 export async function loadConfig(path: string): Promise<Config> {
   const defaults = getDefaultConfig();
 
-  if (!await exists(path)) {
-    await Deno.writeTextFile(path, buildDefaultToml(defaults));
+  try {
+    await access(path, constants.F_OK);
+  } catch {
+    await writeDefaultConfig(path, defaults);
     console.log(`📝 Created default config file: ${path}`);
     return defaults;
   }
 
-  const content = await Deno.readTextFile(path);
+  const content = await readFile(path, "utf8");
   const parsed = parseToml(content) as Partial<Config>;
 
   const config: Config = {
-    language:  parsed.language          ?? defaults.language,
-    llm:       { ...defaults.llm,       ...(parsed.llm      ?? {}) },
-    mermaid:   { ...defaults.mermaid,   ...(parsed.mermaid  ?? {}) },
-    scan:      { ...defaults.scan,      ...(parsed.scan     ?? {}) },
+    language: parsed.language ?? defaults.language,
+    llm: { ...defaults.llm, ...(parsed.llm ?? {}) },
+    mermaid: { ...defaults.mermaid, ...(parsed.mermaid ?? {}) },
+    scan: { ...defaults.scan, ...(parsed.scan ?? {}) },
+    report: { ...defaults.report, ...(parsed.report ?? {}) },
   };
 
   // Environment variable overrides for API key
   if (!config.llm.api_key) {
-    config.llm.api_key =
-      Deno.env.get("LITHO_LLM_API_KEY") ??
-      Deno.env.get("LLM_API_KEY");
+    config.llm.api_key = process.env.LITHO_LLM_API_KEY ??
+      process.env.LLM_API_KEY;
   }
 
   return config;
+}
+
+export async function writeDefaultConfig(
+  path: string,
+  config = getDefaultConfig(),
+): Promise<void> {
+  const dir = dirname(path);
+  if (dir) {
+    await mkdir(dir, { recursive: true });
+  }
+  await writeFile(path, buildDefaultToml(config), "utf8");
 }
 
 function buildDefaultToml(c: Config): string {
@@ -114,5 +188,13 @@ max_retries     = ${c.mermaid.max_retries}
 # "._*" (SMB metadata files) is always excluded automatically — no need to add it.
 # exclude_patterns = ["\\.tmp$", "^~\\$"]
 exclude_patterns = []
+
+[report]
+# Optional JSON diagnostics report path.
+# Leave empty to write to the OS app-state directory, e.g.
+# macOS:  ~/Library/Application Support/mermaid-fixer-ts/reports/
+# Linux:  ~/.local/state/mermaid-fixer-ts/reports/
+# Win:    %LOCALAPPDATA%\\mermaid-fixer-ts\\reports\\
+path = ""
 `;
 }

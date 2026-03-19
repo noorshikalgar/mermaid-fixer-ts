@@ -5,7 +5,7 @@ language = "en"
 [llm]
 # Provider: ollama, openai, mistral, deepseek, or any OpenAI-compatible endpoint
 provider = "ollama"
-model    = "llama3"
+model    = "qwen3.5:9b"
 # api_key = "your-key"   # or set LITHO_LLM_API_KEY env var (not needed for ollama)
 # base_url = ""          # defaults: ollama=http://localhost:11434/v1  openai=https://api.openai.com/v1
 max_tokens  = 4096
